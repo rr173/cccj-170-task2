@@ -265,6 +265,7 @@ export class ConjunctionService {
     this.store.audit('EVENT_VERSION_APPENDED', {
       eventId: event.id, version: version.version, pc: version.pc,
       missKm: version.missDistanceKm.total, risk: version.riskLevel,
+      tca: version.tca, status: event.status,
     });
     return { event, appended: true, version };
   }

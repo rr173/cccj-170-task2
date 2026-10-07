@@ -6,6 +6,7 @@ import { Store } from './store.js';
 import { ConjunctionService } from './services/conjunction.js';
 import { ManeuverService } from './services/maneuver.js';
 import { CoordinationService } from './services/coordination.js';
+import { ReplayService } from './services/replay.js';
 import { HttpError } from './util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,7 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
   const conjunction = new ConjunctionService(store, { screening });
   const coordination = new CoordinationService(store);
   const maneuver = new ManeuverService(store, conjunction, coordination);
+  const replay = new ReplayService(store);
 
   const routes = [];
   const route = (method, pattern, handler) => {
@@ -133,6 +135,32 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
     const limit = Number(query.limit || 200);
     json(res, 200, store.auditTrail.slice(-limit));
   });
+
+  /* ---------- 只读审计回放（值班人员；不写入任何线上状态） ---------- */
+  route('GET', '/api/replay/verify', async (req, res) => {
+    json(res, 200, { readOnly: true, checkedAt: new Date().toISOString(), verification: replay.verify() });
+  });
+  route('GET', '/api/replay/timeline', async (req, res, { query }) => {
+    json(res, 200, replay.timeline({ eventId: query.eventId || null, at: query.at || null }));
+  });
+  route('GET', '/api/replay/diff', async (req, res, { query }) => {
+    json(res, 200, replay.diff({ eventId: query.eventId || null, from: query.from, to: query.to }));
+  });
+  route('GET', '/api/replay/export', async (req, res, { query }) => {
+    // 仅支持 json / csv；其余格式由服务层抛 415 UNSUPPORTED_FORMAT
+    const out = replay.exportDiff({
+      eventId: query.eventId || null,
+      from: query.from,
+      to: query.to,
+      format: (query.format || 'json').toLowerCase(),
+    });
+    res.writeHead(200, {
+      'Content-Type': out.contentType,
+      'Content-Disposition': `attachment; filename="${out.filename}"`,
+      'Cache-Control': 'no-store',
+    });
+    res.end(out.body);
+  });
   route('GET', '/api/health', async (req, res) => {
     json(res, 200, { status: 'ok', at: new Date().toISOString() });
   });
@@ -140,6 +168,11 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
   /* ---------- 分析页面 ---------- */
   route('GET', '/', async (req, res) => {
     const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  });
+  route('GET', '/audit', async (req, res) => {
+    const html = fs.readFileSync(path.join(PUBLIC_DIR, 'audit.html'), 'utf8');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });
@@ -171,7 +204,7 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
     }
   });
 
-  return { server, store, conjunction, maneuver, coordination };
+  return { server, store, conjunction, maneuver, coordination, replay };
 }
 
 function readBody(req) {

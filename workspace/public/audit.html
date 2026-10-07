@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>只读审计回放 · 值班</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e;
+          --red:#f85149; --yellow:#d29922; --green:#3fb950; --blue:#58a6ff; --purple:#bc8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:12px 20px; border-bottom:1px solid var(--border); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  main { padding:12px 20px; max-width:1280px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .panel h2 { font-size:13px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:5px 7px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+  .RED { background:rgba(248,81,73,.15); color:var(--red); border:1px solid var(--red); }
+  .YELLOW { background:rgba(210,153,34,.15); color:var(--yellow); border:1px solid var(--yellow); }
+  .GREEN { background:rgba(63,185,80,.15); color:var(--green); border:1px solid var(--green); }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:11px; background:#21262d; color:var(--dim); border:1px solid var(--border); }
+  .tag.APPROVED { color:var(--blue); border-color:var(--blue); }
+  .tag.DISPATCHED { color:var(--green); border-color:var(--green); }
+  .tag.CANCELLED, .tag.SUPERSEDED, .tag.REJECTED, .tag.STALE_REJECTED { color:var(--yellow); border-color:var(--yellow); }
+  .tag.SENT, .tag.APPLIED { color:var(--green); border-color:var(--green); }
+  button { background:#21262d; color:var(--fg); border:1px solid var(--border); border-radius:6px;
+           padding:5px 14px; cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--blue); }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  input,select { background:#0d1117; color:var(--fg); border:1px solid var(--border);
+           border-radius:6px; padding:5px 8px; font-size:12px; width:100%; }
+  label { display:block; font-size:11px; color:var(--dim); margin:6px 0 2px; }
+  .mono { font-family:ui-monospace,monospace; font-size:11px; }
+  .muted { color:var(--dim); }
+  a { color:var(--blue); text-decoration:none; }
+  .verify-ok { border-color:var(--green); background:rgba(63,185,80,.08); }
+  .verify-warn { border-color:var(--yellow); background:rgba(210,153,34,.08); }
+  .verify-bad { border-color:var(--red); background:rgba(248,81,73,.08); }
+  .ro { font-size:11px; color:var(--green); border:1px solid var(--green); border-radius:10px; padding:1px 8px; }
+  .tl-row { display:flex; gap:10px; padding:5px 8px; border-bottom:1px solid var(--border); font-size:12px; align-items:baseline; }
+  .tl-row .seq { color:var(--dim); width:42px; text-align:right; flex:none; font-family:ui-monospace,monospace; }
+  .tl-row .ts { color:var(--dim); width:150px; flex:none; font-family:ui-monospace,monospace; font-size:10px; }
+  .tl-row.clickable { cursor:pointer; }
+  .tl-row.clickable:hover { background:#1c2129; }
+  .tl-row.picked-from { background:rgba(88,166,255,.15); border-left:3px solid var(--blue); }
+  .tl-row.picked-to { background:rgba(188,140,255,.15); border-left:3px solid var(--purple); }
+  .arrow-up { color:var(--green); } .arrow-down { color:var(--red); } .arrow-same { color:var(--dim); }
+  .diff-card { border:1px solid var(--border); border-radius:6px; padding:10px; margin:8px 0; background:#0d1117; }
+  .diff-card h3 { margin:0 0 6px; font-size:12px; }
+  .change-added { color:var(--green); } .change-removed { color:var(--red); } .change-changed { color:var(--yellow); }
+  .errbox { border:1px solid var(--red); border-radius:8px; padding:12px; background:rgba(248,81,73,.08); margin-bottom:12px; }
+  .errbox code { color:var(--red); font-size:13px; font-weight:700; }
+  .kvs { font-size:11px; color:var(--dim); }
+  .kvs b { color:var(--fg); font-weight:600; }
+  .legacy-note { font-size:11px; color:var(--yellow); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔒 只读审计回放 · 值班台</h1>
+  <span class="ro">READ-ONLY · 不写入线上状态</span>
+  <span class="muted" style="font-size:12px">
+    <a href="/">← 返回会合分析</a> ·
+    <a href="/api/replay/timeline">/api/replay/timeline</a> ·
+    <a href="/api/replay/verify">链校验</a>
+  </span>
+</header>
+<main>
+
+  <!-- 筛选条件 -->
+  <div class="panel">
+    <h2>筛选条件</h2>
+    <div class="grid">
+      <div>
+        <label>会合事件（留空 = 全局所有事件）</label>
+        <select id="f-event"><option value="">（全局）</option></select>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <button class="primary" onclick="loadTimeline()">重建协同时间线</button>
+        <span class="muted" id="f-meta"></span>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:8px">
+      <div>
+        <label>截面 A（from）— 序号 / latest / genesis / v&lt;n&gt;</label>
+        <input id="f-from" value="genesis" placeholder="如 genesis / latest / 6 / v1">
+      </div>
+      <div>
+        <label>截面 B（to）</label>
+        <input id="f-to" value="latest" placeholder="如 latest / 13 / v2">
+      </div>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="primary" onclick="loadDiff()">比较两个截面</button>
+      <button onclick="exportDiff('json')">导出 JSON</button>
+      <button onclick="exportDiff('csv')">导出 CSV</button>
+      <button onclick="exportDiff('xml')" title="故意触发不支持格式错误">导出 XML（应报错）</button>
+      <span class="muted" id="diff-meta"></span>
+    </div>
+  </div>
+
+  <!-- 错误区 -->
+  <div id="error-box"></div>
+
+  <!-- 链校验结果 -->
+  <div class="panel" id="verify-panel">
+    <h2>哈希链校验结果</h2>
+    <div id="verify-body" class="muted">尚未校验</div>
+  </div>
+
+  <!-- 时间线 -->
+  <div class="panel">
+    <h2>协同时间线（从追加账本折叠重建）<span class="muted" style="text-transform:none;letter-spacing:0"> · 点击行选入 A/B 截面</span></h2>
+    <div class="kvs" id="tl-meta" style="margin-bottom:6px"></div>
+    <div id="timeline"><span class="muted">点击“重建协同时间线”…</span></div>
+  </div>
+
+  <!-- 差异内容 -->
+  <div class="panel" id="diff-panel" style="display:none">
+    <h2>截面差异</h2>
+    <div id="diff-head" class="kvs" style="margin-bottom:8px"></div>
+    <div id="diff-body"></div>
+  </div>
+
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timelineData = null;
+let picked = null; // 下一次点击填充 'from' / 'to'
+
+async function apiJson(path) {
+  const r = await fetch(path);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error?.message || r.statusText);
+    err.code = data.error?.code;
+    err.status = r.status;
+    err.details = data.error?.details;
+    throw err;
+  }
+  return data;
+}
+const fmtT = (iso) => iso ? iso.replace('T',' ').replace(/\.\d+Z$/,'Z') : '-';
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const pcFmt = (x) => (typeof x === 'number') ? x.toExponential(2) : (x ?? '—');
+
+function showError(err) {
+  let detailHtml = '';
+  if (err.code === 'CHAIN_INVALID' && err.details?.verification) {
+    const v = err.details.verification;
+    detailHtml = v.errors.map(e => `<li><code>${esc(e.code)}</code> ${esc(e.message)}</li>`).join('');
+  }
+  $('error-box').innerHTML = `<div class="errbox">
+    <div>请求被拒绝（可识别错误）：<code>${esc(err.code || 'ERROR')}</code> · HTTP ${err.status || ''}</div>
+    <div style="margin-top:4px">${esc(err.message)}</div>
+    ${detailHtml ? `<ul style="margin:6px 0 0">${detailHtml}</ul>` : ''}
+  </div>`;
+}
+function clearError() { $('error-box').innerHTML = ''; }
+
+/* ---------- 链校验 ---------- */
+function renderVerification(v) {
+  const panel = $('verify-panel');
+  panel.classList.remove('verify-ok','verify-warn','verify-bad');
+  if (v.status === 'VALID') panel.classList.add('verify-ok');
+  else if (v.status === 'VERIFIED_WITH_LEGACY_PREFIX') panel.classList.add('verify-warn');
+  else panel.classList.add('verify-bad');
+  const errHtml = v.errors.length
+    ? `<ul style="margin:6px 0 0">${v.errors.map(e=>`<li><code class="${v.ok?'':'arrow-down'}">${esc(e.code)}</code> ${esc(e.message)}</li>`).join('')}</ul>`
+    : '';
+  $('verify-body').innerHTML = `
+    <b>状态：${v.ok ? '✅' : '❌'} ${esc(v.status)}</b>
+    <div class="kvs" style="margin-top:4px">
+      账本记录 <b>${v.total}</b> 条 · 已封印 <b>${v.sealedCount}</b> · 未封印旧记录 <b>${v.legacyCount}</b>
+      · 链头序号 <b>${v.headSeq}</b> · 链头哈希 <b class="mono">${esc(String(v.headHash).slice(0,20))}…</b>
+      · 校验时间 ${fmtT(v.checkedAt)}
+    </div>
+    ${v.legacyCount ? `<div class="legacy-note">⚠ 检测到功能上线前的未封印旧记录（${v.legacyCount} 条，作为链首旧前缀可读但不可密码学验真）；其后的封印链校验${v.ok?'通过':'失败'}。</div>` : ''}
+    ${errHtml}`;
+}
+
+/* ---------- 事件下拉 + 时间线 ---------- */
+async function init() {
+  clearError();
+  try {
+    const events = await apiJson('/api/conjunctions');
+    $('f-event').innerHTML = '<option value="">（全局）</option>' +
+      events.map(e => `<option value="${e.id}">${e.id} · ${e.head?.riskLevel || '-'} · v${e.currentVersion}</option>`).join('');
+    await loadTimeline();
+  } catch (e) { showError(e); }
+}
+
+async function loadTimeline() {
+  clearError();
+  const eventId = $('f-event').value;
+  try {
+    const q = eventId ? `?eventId=${encodeURIComponent(eventId)}` : '';
+    timelineData = await apiJson('/api/replay/timeline' + q);
+    renderVerification(timelineData.verification);
+    $('f-meta').textContent = `${timelineData.scope} · ${timelineData.sectionCount} 个可选截面 · ${timelineData.events.length} 个事件`;
+    $('tl-meta').innerHTML = `范围 <b>${timelineData.scope}</b>${eventId?` · 事件 <b>${esc(eventId)}</b>`:''}
+      · 截面 <b>${timelineData.sectionCount}</b> · 生成于 ${fmtT(timelineData.generatedAt)}`;
+    renderTimeline();
+  } catch (e) { showError(e); }
+}
+
+function renderTimeline() {
+  const rows = timelineData.timeline;
+  if (!rows.length) { $('timeline').innerHTML = '<span class="muted">该范围内暂无可折叠的协同记录</span>'; return; }
+  $('timeline').innerHTML = rows.map(r => {
+    const isSection = timelineData.sections.some(s => s.seq === r.seq);
+    return `<div class="tl-row ${isSection?'clickable':''}" ${isSection?`onclick="pick(${r.seq})" title="设为截面"` : ''}>
+      <span class="seq">${r.seq}</span>
+      <span class="ts">${fmtT(r.ts)}</span>
+      <span>${esc(r.label)}${r.legacy?' <span class="legacy-note">[旧记录]</span>':''}</span>
+    </div>`;
+  }).join('');
+}
+
+/** 连续点击时间线：第一次填 from，第二次填 to */
+function pick(seq) {
+  if (picked !== 'to') {
+    $('f-from').value = seq;
+    picked = 'to';
+  } else {
+    $('f-to').value = seq;
+    picked = 'from';
+  }
+  markPicked();
+}
+function markPicked() {
+  document.querySelectorAll('.tl-row').forEach(el => el.classList.remove('picked-from','picked-to'));
+}
+
+/* ---------- 差异 ---------- */
+async function loadDiff() {
+  clearError();
+  const eventId = $('f-event').value;
+  const from = $('f-from').value.trim();
+  const to = $('f-to').value.trim();
+  try {
+    const q = new URLSearchParams();
+    if (eventId) q.set('eventId', eventId);
+    q.set('from', from); q.set('to', to);
+    const d = await apiJson('/api/replay/diff?' + q.toString());
+    renderVerification(d.verification);
+    renderDiff(d);
+  } catch (e) {
+    $('diff-panel').style.display = 'none';
+    showError(e);
+  }
+}
+
+function renderDiff(d) {
+  $('diff-panel').style.display = 'block';
+  $('diff-meta').textContent = `${d.from.seq} → ${d.to.seq} · ${d.direction}`;
+  $('diff-head').innerHTML = `
+    事件 <b>${esc(d.eventId)}</b> · 方向 <b>${d.direction === 'FORWARD' ? 'A → B（顺时间）' : 'B → A（逆时间）'}</b><br>
+    A (from) <b>#${d.from.seq}</b> ${esc(d.from.label)} · ${fmtT(d.from.ts)}<br>
+    B (to) &nbsp;&nbsp;<b>#${d.to.seq}</b> ${esc(d.to.label)} · ${fmtT(d.to.ts)}`;
+  const x = d.differences;
+  $('diff-body').innerHTML = [
+    riskCard(x.risk),
+    collectionCard('承诺 commitments', x.commitments, commitmentRow, commitmentChangeRow),
+    collectionCard('协同消息 messages', x.messages, messageRow, messageChangeRow),
+  ].join('');
+}
+
+function riskCard(r) {
+  const rows = r.fields.map(f => {
+    const val = (v, name) => name === 'pc' ? pcFmt(v)
+      : name === 'missDistanceKm' ? (typeof v === 'number' ? v.toFixed(3) : (v ?? '—'))
+      : (v ?? '—');
+    const arrow = f.changed ? '<span class="arrow-up">▲</span>' : '<span class="arrow-same">＝</span>';
+    return `<tr><td>${esc(f.label)}</td>
+      <td class="mono">${esc(val(f.from, f.field))}</td><td>${arrow}</td>
+      <td class="mono">${esc(val(f.to, f.field))}</td></tr>`;
+  }).join('');
+  return `<div class="diff-card"><h3>风险 risk ${r.changed?'<span class="change-changed">（有变化）</span>':'<span class="muted">（无变化）</span>'}</h3>
+    <table><thead><tr><th>字段</th><th>A (from)</th><th></th><th>B (to)</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function collectionCard(title, c, rowFn, changeFn) {
+  const summary = `新增 <b class="change-added">${c.addedCount}</b> · 移除 <b class="change-removed">${c.removedCount}</b> · 变化 <b class="change-changed">${c.changedCount}</b> · 不变 ${c.unchangedCount}`;
+  let body = '';
+  if (c.added.length) body += c.added.map(i => `<div class="change-added">＋ ${rowFn(i)}</div>`).join('');
+  if (c.removed.length) body += c.removed.map(i => `<div class="change-removed">－ ${rowFn(i)}</div>`).join('');
+  if (c.changed.length) body += c.changed.map(changeFn).join('');
+  if (!body) body = '<span class="muted">两截面间无差异</span>';
+  return `<div class="diff-card"><h3>${esc(title)} <span class="muted" style="text-transform:none">（${summary}）</span></h3>${body}</div>`;
+}
+const commitmentRow = (c) => `<span class="mono">${esc(c.id)}</span> v${c.version}
+  <span class="tag ${c.status}">${c.status}</span> · Δ燃料 ${c.requiredFuelKg ?? '?'} kg ·
+  快照 <span class="mono">${esc((c.snapshotHash||'').slice(0,12))}…</span> · ${fmtT(c.createdAt)}`;
+const commitmentChangeRow = (c) => `<div class="change-changed">
+  ◆ <span class="mono">${esc(c.id)}</span> v${c.to.version}:
+  <span class="tag ${c.from.status}">${c.from.status}</span> → <span class="tag ${c.to.status}">${c.to.status}</span>
+  ${c.from.requiredFuelKg!==c.to.requiredFuelKg?` · 燃料 ${c.from.requiredFuelKg} → ${c.to.requiredFuelKg}`:''}</div>`;
+const messageRow = (m) => `<span class="mono">${esc(m.id)}</span> ${m.direction==='INBOUND'?'⬅':'➡'}
+  ${esc(m.type)} v${m.version} <span class="tag ${m.status}">${m.status}</span> · ${fmtT(m.at)}`;
+const messageChangeRow = (m) => `<div class="change-changed">
+  ◆ <span class="mono">${esc(m.id)}</span> ${esc(m.from.type)} v${m.from.version}:
+  <span class="tag ${m.from.status}">${m.from.status}</span> → <span class="tag ${m.to.status}">${m.to.status}</span></div>`;
+
+/* ---------- 导出（GET 下载；错误 JSON 就地显示） ---------- */
+async function exportDiff(format) {
+  clearError();
+  const eventId = $('f-event').value;
+  const from = $('f-from').value.trim();
+  const to = $('f-to').value.trim();
+  const q = new URLSearchParams();
+  if (eventId) q.set('eventId', eventId);
+  q.set('from', from); q.set('to', to); q.set('format', format);
+  try {
+    const r = await fetch('/api/replay/export?' + q.toString());
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      const err = new Error(data.error?.message || r.statusText);
+      err.code = data.error?.code; err.status = r.status; err.details = data.error?.details;
+      throw err;
+    }
+    const blob = await r.blob();
+    const filename = (r.headers.get('Content-Disposition') || '').match(/filename="?([^"]+)"?/)?.[1] || `audit-diff.${format}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) { showError(e); }
+}
+
+init();
+</script>
+</body>
+</html>

@@ -128,7 +128,9 @@ export class CoordinationService {
     commitment.cancelledByMessage = msg.id;
     s.coordApplied.set(this._key(msg.counterpartId, msg.eventId), msg.version);
     msg.status = 'APPLIED';
-    this.store.audit('COMMITMENT_CANCELLED_BY_COUNTERPART', { commitmentId, messageId: msg.id, version: msg.version });
+    this.store.audit('COMMITMENT_CANCELLED_BY_COUNTERPART', {
+      commitmentId, eventId: event.id, messageId: msg.id, version: msg.version,
+    });
     return { messageId: msg.id, status: 'APPLIED', commitmentStatus: 'CANCELLED' };
   }
 
@@ -150,7 +152,10 @@ export class CoordinationService {
       status: 'SENT',
     };
     s.messages.set(msg.id, msg);
-    this.store.audit('MESSAGE_SENT', { messageId: msg.id, type, eventId, version: seq });
+    this.store.audit('MESSAGE_SENT', {
+      messageId: msg.id, counterpartId: msg.counterpartId, type, eventId,
+      version: seq, payload,
+    });
     this.store.save();
     return msg;
   }
