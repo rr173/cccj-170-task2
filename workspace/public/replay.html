@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>只读审计回放 · 碰撞预警与机动协同</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e;
+          --red:#f85149; --yellow:#d29922; --green:#3fb950; --blue:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:12px 20px; border-bottom:1px solid var(--border); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header .muted, .muted { color:var(--dim); font-size:12px; }
+  main { padding:12px 20px; max-width:1280px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .panel h2 { font-size:13px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .readonly-banner { background:rgba(88,166,255,.08); border:1px solid var(--blue); color:var(--blue);
+                     padding:8px 12px; border-radius:8px; font-size:13px; margin-bottom:12px; }
+  .chain-ok { background:rgba(63,185,80,.08); border:1px solid var(--green); color:var(--green); }
+  .chain-bad { background:rgba(248,81,73,.1); border:1px solid var(--red); color:var(--red); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:5px 7px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+  .RED { background:rgba(248,81,73,.15); color:var(--red); border:1px solid var(--red); }
+  .YELLOW { background:rgba(210,153,34,.15); color:var(--yellow); border:1px solid var(--yellow); }
+  .GREEN { background:rgba(63,185,80,.15); color:var(--green); border:1px solid var(--green); }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:11px; background:#21262d; color:var(--dim); border:1px solid var(--border); }
+  .tag.ADDED { color:var(--green); border-color:var(--green); }
+  .tag.REMOVED { color:var(--red); border-color:var(--red); }
+  .tag.CHANGED { color:var(--yellow); border-color:var(--yellow); }
+  .tag.RISK { color:var(--blue); border-color:var(--blue); }
+  .tag.COMMITMENT { color:#bc8cff; border-color:#8957e5; }
+  .tag.MESSAGE { color:var(--green); }
+  .tag.OTHER { color:var(--dim); }
+  button { background:#21262d; color:var(--fg); border:1px solid var(--border); border-radius:6px;
+           padding:5px 14px; cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--blue); }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  select,input { background:#0d1117; color:var(--fg); border:1px solid var(--border);
+           border-radius:6px; padding:5px 8px; font-size:12px; }
+  label { display:block; font-size:11px; color:var(--dim); margin:0 0 2px; }
+  .grid4 { display:grid; grid-template-columns:1.4fr .8fr 1fr 1fr auto; gap:8px; align-items:end; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .mono { font-family:ui-monospace,monospace; }
+  a { color:var(--blue); text-decoration:none; }
+  .errbox { background:rgba(248,81,73,.08); border:1px solid var(--red); border-radius:8px; padding:10px 14px; margin-bottom:12px; }
+  .errbox code { color:var(--red); font-weight:700; }
+  .ok { color:var(--green); } .err { color:var(--red); }
+  .from { color:var(--red); } .to { color:var(--green); }
+  details { margin:4px 0; } summary { cursor:pointer; color:var(--dim); font-size:12px; }
+  .arrow { color:var(--dim); margin:0 6px; }
+  .hash { font-size:10px; word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔒 只读审计回放</h1>
+  <span class="muted">从追加账本（audit ledger）重建协同时间线 · 双截面对比 · 只读不写线上状态</span>
+  <span style="flex:1"></span>
+  <a href="/">← 返回会合分析</a>
+</header>
+<main>
+  <div class="readonly-banner" id="ro-banner">
+    ♻️ 本页所有数据均通过哈希链账本回放得到，不调用任何写接口，不会改变线上事件版本、承诺或消息。
+  </div>
+
+  <div id="error" style="display:none"></div>
+
+  <!-- 筛选条件 -->
+  <div class="panel">
+    <h2>筛选条件</h2>
+    <div class="grid4">
+      <div>
+        <label>会合事件 eventId（必填；不允许跨事件）</label>
+        <select id="f-event" style="width:100%"><option value="">加载中…</option></select>
+      </div>
+      <div>
+        <label>最低风险</label>
+        <select id="f-risk"><option value="">全部</option><option>YELLOW</option><option>RED</option></select>
+      </div>
+      <div>
+        <label>截面 A（较早）</label>
+        <select id="f-from" style="width:100%"><option>HEAD</option></select>
+      </div>
+      <div>
+        <label>截面 B（较晚）</label>
+        <select id="f-to" style="width:100%"><option>HEAD</option></select>
+      </div>
+      <div>
+        <button class="primary" onclick="runDiff()">对比差异</button>
+      </div>
+    </div>
+    <div style="margin-top:8px" class="muted">
+      截面支持账本序号（seq）、ISO 时间戳或 HEAD；选择顺序可互换，系统自动按账本顺序归正。
+      <button onclick="loadTimeline()">重建时间线</button>
+    </div>
+  </div>
+
+  <!-- 链校验结果 -->
+  <div class="panel">
+    <h2>哈希链校验结果 <button style="float:right" onclick="loadChain()">重新校验</button></h2>
+    <div id="chain"><span class="muted">校验中…</span></div>
+  </div>
+
+  <!-- 重建时间线 -->
+  <div class="panel">
+    <h2>重建的协同时间线</h2>
+    <div id="recon" class="muted">请先选择事件并「重建时间线」。</div>
+    <div id="timeline" style="max-height:340px; overflow:auto; margin-top:8px"></div>
+  </div>
+
+  <!-- 差异内容 -->
+  <div class="panel">
+    <h2>截面差异
+      <span id="export-links" style="display:none; float:right">
+        导出 <a id="exp-json" href="#">JSON</a> · <a id="exp-csv" href="#">CSV</a>
+      </span>
+    </h2>
+    <div id="diff" class="muted">选择两个历史截面后点击「对比差异」。</div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path) {
+  const r = await fetch(path);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(data.error?.message || r.statusText);
+    e.status = r.status; e.code = data.error?.code; e.details = data.error?.details; e.body = data;
+    throw e;
+  }
+  return data;
+}
+const fmtPc = (pc) => typeof pc !== 'number' ? '-' : (pc === 0 ? '0' : pc.toExponential(2));
+const fmtT = (iso) => iso ? String(iso).replace('T',' ').replace(/\.\d+Z$/,'Z') : '-';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function showError(e) {
+  const code = e.code ? `<code>[${e.code}]</code> ` : '';
+  let extra = '';
+  if (e.code === 'CHAIN_VALIDATION_FAILED' && e.details?.chain?.errors) {
+    extra = '<ul style="margin:6px 0 0">' + e.details.chain.errors.slice(0, 8)
+      .map(x => `<li class="mono">${esc(x.code)} · 第 ${x.line} 行 · ${esc(x.message)}</li>`).join('') + '</ul>';
+  }
+  $('error').style.display = 'block';
+  $('error').innerHTML = `<div class="errbox">${code}${esc(e.message || e)}（HTTP ${e.status || '?'}）${extra}</div>`;
+}
+function clearError() { $('error').style.display = 'none'; $('error').innerHTML = ''; }
+
+async function loadChain() {
+  try {
+    const c = await api('/api/replay/chain');
+    $('chain').innerHTML = `<span class="ok">✔ 链校验通过</span>
+      <span class="muted">（来源 ${c.source === 'file' ? '追加账本文件' : '内存账本'} · 校验 ${c.entriesChecked} 条 ·
+      头 seq=${c.headSeq} · head hash <span class="mono">${esc(String(c.headHash).slice(0,24))}…</span>
+      · 校验时刻 ${fmtT(c.verifiedAt)}）</span>`;
+    $('chain').className = 'chain-ok';
+    $('chain').style.cssText = 'padding:8px 12px; border-radius:6px';
+  } catch (e) {
+    if (e.code === 'CHAIN_VALIDATION_FAILED') {
+      const c = e.details.chain;
+      $('chain').innerHTML = `<span class="err">✘ 链校验失败（${c.errors.length} 处），回放/对比/导出已被拒绝</span>
+        <ul style="margin:6px 0 0">${c.errors.slice(0, 10).map(x =>
+          `<li class="mono">${esc(x.code)} · 第 ${x.line} 行 · ${esc(x.message)}</li>`).join('')}</ul>`;
+      $('chain').className = 'chain-bad';
+      $('chain').style.cssText = 'padding:8px 12px; border-radius:6px';
+    } else { $('chain').textContent = '校验失败: ' + e.message; }
+  }
+}
+
+async function loadEvents() {
+  const evs = await api('/api/conjunctions');
+  $('f-event').innerHTML = evs.length
+    ? evs.map(e => `<option value="${e.id}">${e.id} · ${e.head?.riskLevel || '-'} · v${e.currentVersion} / 承诺v${e.commitmentHead}</option>`).join('')
+    : '<option value="">（暂无事件）</option>';
+}
+
+function cutOptions(cuts) {
+  const opts = ['<option value="HEAD">HEAD（账本最新）</option>'];
+  for (const c of cuts) {
+    opts.push(`<option value="${c.seq}">#${c.seq} · ${fmtT(c.ts)} · ${esc(c.label).replace(/"/g,'')}</option>`);
+  }
+  return opts.join('');
+}
+
+async function loadTimeline() {
+  clearError();
+  const eventId = $('f-event').value;
+  $('timeline').innerHTML = '';
+  $('recon').textContent = '加载中…';
+  if (!eventId) { $('recon').textContent = '请先选择事件'; return; }
+  try {
+    const q = new URLSearchParams({ eventId });
+    if ($('f-risk').value) q.set('minRisk', $('f-risk').value);
+    const tl = await api('/api/replay/timeline?' + q.toString());
+
+    $('f-from').innerHTML = cutOptions(tl.cuts);
+    $('f-to').innerHTML = cutOptions(tl.cuts);
+    $('f-to').value = 'HEAD';
+    if (tl.cuts.length >= 2) $('f-from').value = String(tl.cuts[Math.max(0, tl.cuts.length - 3)].seq);
+
+    const r = tl.reconstructed;
+    $('recon').innerHTML = `
+      <div style="margin-bottom:6px">
+        账本头 seq=<b>${tl.headSeq ?? '-'}</b> · 时间线事实 <b>${tl.timeline.length}</b> 条 ·
+        链校验 <span class="${tl.chain.ok ? 'ok' : 'err'}">${tl.chain.ok ? '通过' : '失败'}</span>
+      </div>
+      <table><thead><tr><th>类别</th><th>数量 / 当前值（回放重建）</th></tr></thead><tbody>
+        <tr><td><span class="tag RISK">RISK</span></td>
+          <td>${r.currentRisk
+            ? `当前 v${r.currentRisk.eventVersion} <span class="badge ${r.currentRisk.riskLevel}">${r.currentRisk.riskLevel}</span>
+               Pc=${fmtPc(r.currentRisk.pc)} · 脱靶 ${Number(r.currentRisk.missDistanceKm).toFixed(3)} km`
+            : '无风险版本'}（共 ${r.riskVersions.length} 个版本）</td></tr>
+        <tr><td><span class="tag COMMITMENT">COMMITMENT</span></td>
+          <td>${r.commitments.length ? r.commitments.map(c =>
+            `<span class="tag">${esc(c.commitmentId)}</span> v${c.version} ${esc(c.status)}`).join('，') : '无承诺'}</td></tr>
+        <tr><td><span class="tag MESSAGE">MESSAGE</span></td>
+          <td>${r.messages.length ? r.messages.map(m =>
+            `<span class="tag">${esc(m.direction === 'INBOUND' ? '⬅' : '➡')} ${esc(m.messageId)}</span>
+             ${esc(m.type)} v${m.version} ${esc(m.status)}`).join('，') : '无消息'}</td></tr>
+      </tbody></table>`;
+
+    $('timeline').innerHTML = `<table><thead><tr>
+      <th>seq</th><th>时间</th><th>类别</th><th>账本事件</th><th>说明</th></tr></thead><tbody>
+      ${tl.timeline.map(f => `<tr>
+        <td class="mono">${f.seq}</td><td class="mono">${fmtT(f.ts)}</td>
+        <td><span class="tag ${f.category}">${f.category}</span></td>
+        <td class="mono">${esc(f.kind)}</td><td>${esc(f.label)}</td></tr>`).join('')}
+      </tbody></table>`;
+  } catch (e) {
+    $('recon').textContent = '时间线重建失败';
+    showError(e);
+  }
+}
+
+function fieldRows(fields) {
+  return fields.map(f => `<tr><td class="mono">${esc(f.field)}</td>
+    <td class="from mono">${esc(disp(f.from))}</td><td class="to mono">${esc(disp(f.to))}</td></tr>`).join('');
+}
+const disp = (v) => {
+  if (v === null || v === undefined) return '∅';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+};
+
+async function runDiff() {
+  clearError();
+  const eventId = $('f-event').value;
+  if (!eventId) { showError({ message: '请先选择事件' }); return; }
+  const from = $('f-from').value, to = $('f-to').value;
+  try {
+    const q = new URLSearchParams({ eventId,
+      from: from === 'HEAD' ? 'HEAD' : from, to: to === 'HEAD' ? 'HEAD' : to });
+    if ($('f-risk').value) q.set('minRisk', $('f-risk').value);
+    const d = await api('/api/replay/diff?' + q.toString());
+
+    $('exp-json').href = `/api/replay/diff?${q.toString()}&format=json`;
+    $('exp-csv').href = `/api/replay/diff?${q.toString()}&format=csv`;
+    $('export-links').style.display = 'inline';
+
+    const sec = (title, tag, added, removed, changed, renderItem, changedTitle) => `
+      <h3 style="margin:10px 0 4px;font-size:13px">${title}
+        <span class="muted">（+${added.length} / −${removed.length} / ✎${changed.length}）</span></h3>
+      ${added.length ? `<div>${added.map(x => `<span class="tag ADDED">+</span> ${renderItem(x)}`).join('<br>')}</div>` : ''}
+      ${removed.length ? `<div>${removed.map(x => `<span class="tag REMOVED">−</span> ${renderItem(x)}`).join('<br>')}</div>` : ''}
+      ${changed.length ? changed.map(c => `<details><summary><span class="tag CHANGED">✎</span> ${esc(c[changedTitle])}</summary>
+        <table><thead><tr><th>字段</th><th>截面A</th><th>截面B</th></tr></thead><tbody>${fieldRows(c.fields)}</tbody></table>
+      </details>`).join('') : ''}
+      ${!added.length && !removed.length && !changed.length ? '<div class="muted">无变化</div>' : ''}`;
+
+    $('diff').innerHTML = `
+      <div style="margin-bottom:8px">
+        事件 <b class="mono">${esc(d.eventId)}</b> ·
+        A <span class="mono">#${d.from.seq} @ ${fmtT(d.from.ts)}</span>
+        <span class="arrow">⟶</span>
+        B <span class="mono">#${d.to.seq} @ ${fmtT(d.to.ts)}</span>
+        ${d.orderSwapped ? '<span class="tag YELLOW">已自动按账本顺序归正</span>' : ''}<br>
+        <span class="muted">链校验 <span class="ok">通过</span>（${d.chain.source} · 头 seq=${d.chain.headSeq}
+        · ${fmtT(d.chain.verifiedAt)}）· 只读回放</span>
+      </div>
+
+      <h3 style="margin:6px 0 4px;font-size:13px"><span class="tag RISK">风险</span></h3>
+      ${d.risk.from || d.risk.to ? `
+        <table><thead><tr><th></th><th>截面 A</th><th>截面 B</th></tr></thead><tbody>
+        <tr><td>风险等级</td>
+          <td class="from">${d.risk.from ? `<span class="badge ${d.risk.from.riskLevel}">${d.risk.from.riskLevel}</span>` : '∅'}</td>
+          <td class="to">${d.risk.to ? `<span class="badge ${d.risk.to.riskLevel}">${d.risk.to.riskLevel}</span>` : '∅'}</td></tr>
+        <tr><td>Pc</td><td class="from mono">${fmtPc(d.risk.from?.pc)}</td><td class="to mono">${fmtPc(d.risk.to?.pc)}</td></tr>
+        <tr><td>脱靶(km)</td><td class="from mono">${d.risk.from ? Number(d.risk.from.missDistanceKm).toFixed(3) : '∅'}</td>
+            <td class="to mono">${d.risk.to ? Number(d.risk.to.missDistanceKm).toFixed(3) : '∅'}</td></tr>
+        <tr><td>事件版本</td><td class="from mono">v${d.risk.from?.eventVersion ?? '∅'}</td>
+            <td class="to mono">v${d.risk.to?.eventVersion ?? '∅'}</td></tr>
+        </tbody></table>` : '<div class="muted">两个截面均无风险记录</div>'}
+      ${d.risk.fields.length ? `<details><summary>变化字段 (${d.risk.fields.length})</summary>
+        <table><thead><tr><th>字段</th><th>A</th><th>B</th></tr></thead><tbody>${fieldRows(d.risk.fields)}</tbody></table></details>` : ''}
+
+      ${sec('承诺', 'COMMITMENT', d.commitments.added, d.commitments.removed, d.commitments.changed,
+        c => `<span class="tag COMMITMENT">${esc(c.commitmentId)}</span> 承诺 v${c.version} · ${esc(c.status)}
+          · 燃料 ${c.requiredFuelKg ?? '-'} kg <span class="muted">@${fmtT(c.at)}</span>`, 'commitmentId')}
+
+      ${sec('消息', 'MESSAGE', d.messages.added, d.messages.removed, d.messages.changed,
+        m => `<span class="tag">${esc(m.direction === 'INBOUND' ? '⬅ 入站' : '➡ 出站')}</span>
+          <span class="mono">${esc(m.messageId)}</span> ${esc(m.type)} v${m.version} · ${esc(m.status)}
+          <span class="muted">@${fmtT(m.at)}</span>`, 'messageId')}
+    `;
+  } catch (e) {
+    $('export-links').style.display = 'none';
+    $('diff').innerHTML = '';
+    showError(e);
+  }
+}
+
+(async function init() {
+  await loadChain();
+  try {
+    await loadEvents();
+    await loadTimeline();
+  } catch (e) { showError(e); }
+  $('f-event').addEventListener('change', loadTimeline);
+  $('f-risk').addEventListener('change', loadTimeline);
+})();
+</script>
+</body>
+</html>

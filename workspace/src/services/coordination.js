@@ -33,7 +33,12 @@ export class CoordinationService {
     // 1) 重放去重：同一 messageId 直接返回原回执，不产生任何状态变更
     const existing = s.receipts.get(input.messageId);
     if (existing) {
-      this.store.audit('MESSAGE_REPLAY_DEDUPED', { messageId: input.messageId });
+      const prior = s.messages.get(input.messageId);
+      this.store.audit('MESSAGE_REPLAY_DEDUPED', {
+        messageId: input.messageId,
+        eventId: prior?.eventId || input.eventId || null,
+        counterpartId: prior?.counterpartId || input.counterpartId || null,
+      });
       return { ...existing, deduplicated: true };
     }
 
@@ -78,7 +83,8 @@ export class CoordinationService {
     s.messages.set(msg.id, msg);
     s.receipts.set(msg.id, receipt);
     this.store.audit('MESSAGE_RECEIVED', {
-      messageId: msg.id, type: msg.type, version: msg.version, status: msg.status, eventId: msg.eventId,
+      messageId: msg.id, counterpartId: msg.counterpartId, type: msg.type, version: msg.version,
+      status: msg.status, eventId: msg.eventId,
     });
     this.store.save();
     return receipt;
@@ -107,7 +113,7 @@ export class CoordinationService {
     if (commitment.status === 'DISPATCHED') {
       msg.status = 'REJECTED';
       msg.statusReason = 'DISPATCHED_IMMUTABLE: 已下达机动不可被撤销';
-      this.store.audit('CANCEL_REJECTED_DISPATCHED', { commitmentId, messageId: msg.id, version: msg.version });
+      this.store.audit('CANCEL_REJECTED_DISPATCHED', { commitmentId, messageId: msg.id, eventId: msg.eventId, version: msg.version });
       return { messageId: msg.id, status: 'REJECTED', reason: msg.statusReason, commitmentStatus: 'DISPATCHED' };
     }
     if (commitment.status !== 'APPROVED') {
@@ -119,7 +125,7 @@ export class CoordinationService {
     if (msg.version <= frozenCpVersion) {
       msg.status = 'STALE_REJECTED';
       msg.statusReason = `迟到低版本撤销被拒绝: 版本 ${msg.version} ≤ 承诺冻结版本 ${frozenCpVersion}`;
-      this.store.audit('CANCEL_REJECTED_STALE', { commitmentId, messageId: msg.id, version: msg.version, frozenCpVersion });
+      this.store.audit('CANCEL_REJECTED_STALE', { commitmentId, messageId: msg.id, eventId: msg.eventId, version: msg.version, frozenCpVersion });
       return { messageId: msg.id, status: 'STALE_REJECTED', reason: msg.statusReason };
     }
     // 高版本 CANCEL 且承诺未下达：撤销
@@ -150,7 +156,9 @@ export class CoordinationService {
       status: 'SENT',
     };
     s.messages.set(msg.id, msg);
-    this.store.audit('MESSAGE_SENT', { messageId: msg.id, type, eventId, version: seq });
+    this.store.audit('MESSAGE_SENT', {
+      messageId: msg.id, type, eventId, counterpartId: msg.counterpartId, version: seq,
+    });
     this.store.save();
     return msg;
   }

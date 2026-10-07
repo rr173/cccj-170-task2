@@ -6,6 +6,7 @@ import { Store } from './store.js';
 import { ConjunctionService } from './services/conjunction.js';
 import { ManeuverService } from './services/maneuver.js';
 import { CoordinationService } from './services/coordination.js';
+import { ReplayService } from './services/replay.js';
 import { HttpError } from './util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,7 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
   const conjunction = new ConjunctionService(store, { screening });
   const coordination = new CoordinationService(store);
   const maneuver = new ManeuverService(store, conjunction, coordination);
+  const replay = new ReplayService(store, { auditFile });
 
   const routes = [];
   const route = (method, pattern, handler) => {
@@ -128,6 +130,43 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
     }
   });
 
+  /* ---------- 只读审计回放 ---------- */
+  route('GET', '/api/replay/chain', async (req, res) => {
+    const report = replay.verifyChain();
+    if (!report.ok) {
+      json(res, 409, { error: {
+        code: 'CHAIN_VALIDATION_FAILED',
+        message: `账本哈希链校验失败（${report.errors.length} 处）`,
+        details: { chain: report },
+      } });
+      return;
+    }
+    json(res, 200, report);
+  });
+  route('GET', '/api/replay/timeline', async (req, res, { query }) => {
+    if (!query.eventId) throw new HttpError(400, 'VALIDATION', '回放必须指定 eventId（跨事件时间线不开放）');
+    json(res, 200, replay.timeline(query.eventId, { minRisk: query.minRisk }));
+  });
+  route('GET', '/api/replay/diff', async (req, res, { query }) => {
+    if (!query.eventId) throw new HttpError(400, 'VALIDATION', '差异对比必须指定 eventId（跨事件选择会被拒绝）');
+    const out = replay.exportDiff(
+      query.eventId,
+      { seq: query.fromSeq, ts: query.fromTs, cut: query.from },
+      { seq: query.toSeq, ts: query.toTs, cut: query.to },
+      query.format || 'json',
+      { minRisk: query.minRisk },
+    );
+    if (out.format === 'csv') {
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${out.filename}"`,
+      });
+      res.end(out.body);
+    } else {
+      json(res, 200, out.body, { 'Content-Disposition': `attachment; filename="${out.filename}"` });
+    }
+  });
+
   /* ---------- 审计与健康 ---------- */
   route('GET', '/api/audit', async (req, res, { query }) => {
     const limit = Number(query.limit || 200);
@@ -140,6 +179,11 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
   /* ---------- 分析页面 ---------- */
   route('GET', '/', async (req, res) => {
     const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  });
+  route('GET', '/replay', async (req, res) => {
+    const html = fs.readFileSync(path.join(PUBLIC_DIR, 'replay.html'), 'utf8');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });
@@ -171,7 +215,7 @@ export function createApp({ dataFile = null, auditFile = null, screening = {} } 
     }
   });
 
-  return { server, store, conjunction, maneuver, coordination };
+  return { server, store, conjunction, maneuver, coordination, replay };
 }
 
 function readBody(req) {

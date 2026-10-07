@@ -1,17 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { nowIso } from './util.js';
+import { nowIso, sha256, canonical } from './util.js';
+
+const GENESIS_HASH = 'GENESIS';
 
 /**
  * 版本化存储：
  *  - 全量状态保存在内存 Map 中，写穿（write-through）到 JSON 快照
- *  - 所有状态变更追加到审计日志（append-only）
+ *  - 所有状态变更追加到审计账本（append-only），每条记录携带
+ *    seq / prevHash / hash 形成哈希链，供只读审计回放校验
  *  - 事件版本、承诺版本只增不减 —— 单调版本化由服务层在此之上保证
  */
 export class Store {
   constructor({ file = null, auditFile = null } = {}) {
     this.file = file;
     this.auditFile = auditFile;
+    this.ledgerSeq = 0;
+    this.lastHash = null;
     this.state = {
       objects: new Map(),        // objectId -> SpaceObject
       solutions: new Map(),      // solutionId -> OrbitSolution
@@ -27,6 +32,7 @@ export class Store {
     };
     this.auditTrail = [];
     this._saveTimer = null;
+    if (this.auditFile && fs.existsSync(this.auditFile)) this._loadLedger();
     if (this.file && fs.existsSync(this.file)) this._load();
   }
 
@@ -35,9 +41,14 @@ export class Store {
     return this.state.seq[kind];
   }
 
-  audit(kind, details) {
-    const entry = { ts: nowIso(), kind, ...details };
+  /** 向追加账本写一条哈希链记录（只增不改） */
+  audit(kind, details = {}) {
+    const seq = ++this.ledgerSeq;
+    const prevHash = this.lastHash || GENESIS_HASH;
+    const entry = { seq, prevHash, ts: nowIso(), kind, ...details };
+    entry.hash = sha256(canonical({ seq, prevHash, ts: entry.ts, kind, ...details }));
     this.auditTrail.push(entry);
+    this.lastHash = entry.hash;
     if (this.auditFile) {
       try {
         fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
@@ -45,6 +56,19 @@ export class Store {
       } catch { /* 审计文件写入失败不阻断业务 */ }
     }
     return entry;
+  }
+
+  /** 启动时回放磁盘账本：重建哈希链游标（损坏行跳过，由 ReplayService 校验报错） */
+  _loadLedger() {
+    const lines = fs.readFileSync(this.auditFile, 'utf8').split('\n').filter((l) => l.trim());
+    for (const line of lines) {
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (!entry || typeof entry !== 'object' || !entry.kind) continue;
+      this.auditTrail.push(entry);
+      if (Number.isInteger(entry.seq)) this.ledgerSeq = Math.max(this.ledgerSeq, entry.seq);
+      if (typeof entry.hash === 'string') this.lastHash = entry.hash;
+    }
   }
 
   save() {
